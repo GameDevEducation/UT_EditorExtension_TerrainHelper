@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
 using System.IO;
-using System.Xml.Schema;
+using UnityEngine.SceneManagement;
 
 public class TerrainHelperEditorWindow : EditorWindow
 {
@@ -11,6 +11,14 @@ public class TerrainHelperEditorWindow : EditorWindow
     {
         FitImageToTerrainHeightMap,
         ResizeTerrainHeightMapToMatchImage
+    }
+
+    enum ETextureResolution
+    {
+        Resolution_512x512 = 512,
+        Resolution_1024x1024 = 1024,
+        Resolution_2048x2048 = 2048,
+        Resolution_4096x4096 = 4096,
     }
 
     Terrain SelectedTerrain;
@@ -39,6 +47,9 @@ public class TerrainHelperEditorWindow : EditorWindow
         HeightMapTool_Intensity = 1f;
 
         HeightMapTool_ExportExpanded = true;
+
+        TerrainTool_ConvertToMeshExpanded = true;
+        TerrainTool_TextureResolution = ETextureResolution.Resolution_2048x2048;
     }
 
     private void OnGUI()
@@ -67,6 +78,9 @@ public class TerrainHelperEditorWindow : EditorWindow
     float HeightMapTool_Intensity = 1f;
 
     bool HeightMapTool_ExportExpanded = true;
+
+    bool TerrainTool_ConvertToMeshExpanded = true;
+    ETextureResolution TerrainTool_TextureResolution = ETextureResolution.Resolution_2048x2048;
 
     void OnGUI_HeightMapTools()
     {
@@ -154,6 +168,21 @@ public class TerrainHelperEditorWindow : EditorWindow
         }
 
         EditorGUILayout.EndFoldoutHeaderGroup();
+
+        TerrainTool_ConvertToMeshExpanded = EditorGUILayout.BeginFoldoutHeaderGroup(TerrainTool_ConvertToMeshExpanded, "Convert to Mesh");
+
+        if (TerrainTool_ConvertToMeshExpanded)
+        {
+            TerrainTool_TextureResolution = (ETextureResolution)EditorGUILayout.EnumPopup("Texture Resolution", TerrainTool_TextureResolution);
+
+            if (GUILayout.Button("Convert Terrain"))
+            {
+                ConvertToMesh(SelectedTerrain, TerrainTool_TextureResolution);
+            }
+        }
+
+        EditorGUILayout.EndFoldoutHeaderGroup();
+
     }
 
     void ImportHeightMap(Terrain targetTerrain, Texture2D heightMap, EHeightMapImportMode importMode, float intensity)
@@ -231,6 +260,139 @@ public class TerrainHelperEditorWindow : EditorWindow
         if (saveFilePath.Length > 0)
         {
             System.IO.File.WriteAllBytes(saveFilePath, heightMap.EncodeToPNG());
+        }
+    }
+
+    void ConvertToMesh(Terrain targetTerrain, ETextureResolution textureResolution)
+    {
+        int heightMapResolution = targetTerrain.terrainData.heightmapResolution;
+
+        float[,] heights = targetTerrain.terrainData.GetHeights(0, 0, heightMapResolution, heightMapResolution);
+
+        Vector3[] vertices = new Vector3[heightMapResolution * heightMapResolution];
+        Vector2[] uvCoordinates = new Vector2[heightMapResolution * heightMapResolution];
+        int[] triangleIndices = new int[heightMapResolution * heightMapResolution * 3 * 2];
+
+        // generate the mesh data
+        for (int y = 0; y < heightMapResolution; y++) 
+        { 
+            for(int x = 0; x < heightMapResolution; x++) 
+            {
+                int vertIndex = x + y * heightMapResolution;
+
+                vertices[vertIndex] = new Vector3(x * targetTerrain.terrainData.heightmapScale.x,
+                                                  heights[y, x] * targetTerrain.terrainData.heightmapScale.y,
+                                                  y * targetTerrain.terrainData.heightmapScale.z);
+                uvCoordinates[vertIndex] = new Vector2((float)x / (heightMapResolution - 1f), 
+                                                       (float)y / (heightMapResolution - 1f));
+
+                if ((x < (heightMapResolution - 1)) && (y < (heightMapResolution -1)))
+                {
+                    triangleIndices[(vertIndex * 6) + 0] = vertIndex;
+                    triangleIndices[(vertIndex * 6) + 1] = vertIndex + heightMapResolution;
+                    triangleIndices[(vertIndex * 6) + 2] = vertIndex + heightMapResolution + 1;
+                    triangleIndices[(vertIndex * 6) + 3] = vertIndex;
+                    triangleIndices[(vertIndex * 6) + 4] = vertIndex + heightMapResolution + 1;
+                    triangleIndices[(vertIndex * 6) + 5] = vertIndex + 1;
+                }
+            }
+        }
+
+        string baseAssetName = targetTerrain.name;
+        string scenePath = System.IO.Path.GetDirectoryName(SceneManager.GetActiveScene().path);
+
+        // create the mesh asset
+        Mesh generatedMesh = new Mesh();
+        generatedMesh.indexFormat = triangleIndices.Length > System.UInt16.MaxValue ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
+        generatedMesh.SetVertices(vertices);
+        generatedMesh.SetUVs(0, uvCoordinates);
+        generatedMesh.SetTriangles(triangleIndices, 0);
+        generatedMesh.RecalculateBounds();
+        generatedMesh.RecalculateNormals();
+
+        // save the mesh asset
+        string meshPath = System.IO.Path.Combine(scenePath, $"{baseAssetName}_Mesh.asset");
+        meshPath = AssetDatabase.GenerateUniqueAssetPath(meshPath);
+        AssetDatabase.CreateAsset(generatedMesh, meshPath);
+        AssetDatabase.SaveAssets();
+
+        // setup the texture capture camera
+        GameObject textureCaptureGO = new GameObject("Capture Camera");
+        textureCaptureGO.transform.SetParent(targetTerrain.transform);
+        textureCaptureGO.transform.position = new Vector3(targetTerrain.terrainData.size.x / 2,
+                                                          targetTerrain.terrainData.size.y + 25f,
+                                                          targetTerrain.terrainData.size.z / 2);
+        textureCaptureGO.transform.localEulerAngles = new Vector3(90f, 0, 0);
+
+        Camera captureCamera = textureCaptureGO.AddComponent<Camera>();
+        captureCamera.clearFlags = CameraClearFlags.SolidColor;
+        captureCamera.backgroundColor = Color.black;
+        captureCamera.orthographic = true;
+        captureCamera.orthographicSize = targetTerrain.terrainData.size.x / 2;
+        Undo.RegisterCreatedObjectUndo(textureCaptureGO, "Setup capture camera");
+
+        bool oldDrawTreesAndFoliage = targetTerrain.drawTreesAndFoliage;
+        targetTerrain.drawTreesAndFoliage = false;
+
+        // setup render texture and capture the image
+        RenderTexture captureRT = new RenderTexture((int)textureResolution, (int)textureResolution, 24);
+        captureCamera.targetTexture = captureRT;
+
+        Texture2D capturedTexture = new Texture2D(captureRT.width, captureRT.height, TextureFormat.RGB24, false);
+        captureCamera.Render();
+        RenderTexture.active = captureRT;
+        capturedTexture.ReadPixels(new Rect(0, 0, captureRT.width, captureRT.height), 0, 0);
+
+        // cleanup
+        targetTerrain.drawTreesAndFoliage = oldDrawTreesAndFoliage;
+        RenderTexture.active = null;
+        captureCamera.targetTexture = null;
+        DestroyImmediate(captureRT);
+        DestroyImmediate(textureCaptureGO, true);
+
+        // save the texture asset
+        string texturePath = System.IO.Path.Combine(scenePath, $"{baseAssetName}_Texture.png");
+        texturePath = AssetDatabase.GenerateUniqueAssetPath(texturePath);
+        File.WriteAllBytes(texturePath, capturedTexture.EncodeToPNG());
+        AssetDatabase.Refresh();
+
+        // load the texture asset
+        Texture2D textureAsset = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
+
+        // create the material
+        Material terrainMaterial = new Material(Shader.Find("Standard"));
+        terrainMaterial.SetTexture("_MainTex", textureAsset);
+
+        // save the material asset
+        string materialPath = System.IO.Path.Combine(scenePath, $"{baseAssetName}_Mat.mat");
+        materialPath = AssetDatabase.GenerateUniqueAssetPath(materialPath);
+        AssetDatabase.CreateAsset(terrainMaterial, materialPath);
+        AssetDatabase.SaveAssets();
+
+        // setup the game object
+        GameObject terrainGO = new GameObject($"{targetTerrain.name}_Mesh");
+        MeshFilter meshFilter = terrainGO.AddComponent<MeshFilter>();
+        meshFilter.mesh = generatedMesh;
+        MeshRenderer meshRenderer = terrainGO.AddComponent<MeshRenderer>();
+        meshRenderer.SetMaterials(new List<Material> { terrainMaterial });
+        Undo.RegisterCreatedObjectUndo(terrainGO, "Created mesh game object");
+
+        // save the prefab asset
+        string prefabPath = System.IO.Path.Combine(scenePath, $"{baseAssetName}.prefab");
+        prefabPath = AssetDatabase.GenerateUniqueAssetPath(prefabPath);
+        
+        bool prefabCreated = false;
+        GameObject prefabGO = PrefabUtility.SaveAsPrefabAsset(terrainGO, prefabPath, out prefabCreated);
+        DestroyImmediate(terrainGO, true);
+
+        if (prefabCreated)
+        {
+            GameObject meshGO = PrefabUtility.InstantiatePrefab(prefabGO) as GameObject;
+
+            meshGO.transform.position = targetTerrain.transform.position;
+            meshGO.transform.rotation = targetTerrain.transform.rotation;
+
+            Undo.RegisterCreatedObjectUndo(meshGO, "Created terrain mesh");
         }
     }
 }
