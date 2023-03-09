@@ -21,6 +21,19 @@ public class TerrainHelperEditorWindow : EditorWindow
         Resolution_4096x4096 = 4096,
     }
 
+    enum EMeshExportResolution
+    {
+        MatchHeightMap = 0,
+        Resolution_33x33 = 33,
+        Resolution_65x65 = 65,
+        Resolution_129x129 = 129,
+        Resolution_257x257 = 257,
+        Resolution_513x513 = 513,
+        Resolution_1025x1025 = 1025,
+        Resolution_2049x2049 = 2049,
+        Resolution_4097x4097 = 4097
+    }
+
     Terrain SelectedTerrain;
 
     [MenuItem("Tools/Terrain Helper")]
@@ -50,6 +63,9 @@ public class TerrainHelperEditorWindow : EditorWindow
 
         TerrainTool_ConvertToMeshExpanded = true;
         TerrainTool_TextureResolution = ETextureResolution.Resolution_2048x2048;
+        TerrainTool_MeshResolution = EMeshExportResolution.MatchHeightMap;
+
+        TerrainTool_ExportSplatmapExpanded = true;
     }
 
     private void OnGUI()
@@ -65,7 +81,17 @@ public class TerrainHelperEditorWindow : EditorWindow
         if (SelectedTerrain == null)
             return;
 
+        EditorGUILayout.Separator();
+
         OnGUI_HeightMapTools();
+
+        EditorGUILayout.Separator();
+
+        OnGUI_MeshConversionTools();
+
+        EditorGUILayout.Separator();
+
+        OnGUI_SplatMapTools();
     }
 
     static int[] ValidHeightMapResolutions = new int[] { 33, 65, 129, 257, 513, 1025, 2049, 4097 };
@@ -81,6 +107,9 @@ public class TerrainHelperEditorWindow : EditorWindow
 
     bool TerrainTool_ConvertToMeshExpanded = true;
     ETextureResolution TerrainTool_TextureResolution = ETextureResolution.Resolution_2048x2048;
+    EMeshExportResolution TerrainTool_MeshResolution = EMeshExportResolution.MatchHeightMap;
+
+    bool TerrainTool_ExportSplatmapExpanded = true;
 
     void OnGUI_HeightMapTools()
     {
@@ -168,21 +197,6 @@ public class TerrainHelperEditorWindow : EditorWindow
         }
 
         EditorGUILayout.EndFoldoutHeaderGroup();
-
-        TerrainTool_ConvertToMeshExpanded = EditorGUILayout.BeginFoldoutHeaderGroup(TerrainTool_ConvertToMeshExpanded, "Convert to Mesh");
-
-        if (TerrainTool_ConvertToMeshExpanded)
-        {
-            TerrainTool_TextureResolution = (ETextureResolution)EditorGUILayout.EnumPopup("Texture Resolution", TerrainTool_TextureResolution);
-
-            if (GUILayout.Button("Convert Terrain"))
-            {
-                ConvertToMesh(SelectedTerrain, TerrainTool_TextureResolution);
-            }
-        }
-
-        EditorGUILayout.EndFoldoutHeaderGroup();
-
     }
 
     void ImportHeightMap(Terrain targetTerrain, Texture2D heightMap, EHeightMapImportMode importMode, float intensity)
@@ -261,42 +275,89 @@ public class TerrainHelperEditorWindow : EditorWindow
         {
             System.IO.File.WriteAllBytes(saveFilePath, heightMap.EncodeToPNG());
         }
+
+        AssetDatabase.Refresh();
     }
 
-    void ConvertToMesh(Terrain targetTerrain, ETextureResolution textureResolution)
+    void OnGUI_MeshConversionTools()
+    {
+        TerrainTool_ConvertToMeshExpanded = EditorGUILayout.BeginFoldoutHeaderGroup(TerrainTool_ConvertToMeshExpanded, "Convert to Mesh");
+
+        if (TerrainTool_ConvertToMeshExpanded)
+        {
+            TerrainTool_TextureResolution = (ETextureResolution)EditorGUILayout.EnumPopup("Texture Resolution", TerrainTool_TextureResolution);
+            TerrainTool_MeshResolution = (EMeshExportResolution)EditorGUILayout.EnumPopup("Mesh Resolution", TerrainTool_MeshResolution);
+
+            if (GUILayout.Button("Convert Terrain"))
+            {
+                ConvertToMesh(SelectedTerrain, TerrainTool_TextureResolution, TerrainTool_MeshResolution);
+            }
+        }
+
+        EditorGUILayout.EndFoldoutHeaderGroup();
+    }
+
+    void ConvertHeightMapToMesh(Terrain targetTerrain, EMeshExportResolution meshResolution,
+                                out Vector3[] vertices, out Vector2[] uvCoordinates, out int[] triangleIndices)
     {
         int heightMapResolution = targetTerrain.terrainData.heightmapResolution;
+        int workingMeshResolution = meshResolution == EMeshExportResolution.MatchHeightMap ? heightMapResolution : (int)meshResolution;
 
-        float[,] heights = targetTerrain.terrainData.GetHeights(0, 0, heightMapResolution, heightMapResolution);
+        float[,] heights;
+        Vector3 workingScale = targetTerrain.terrainData.heightmapScale;
+        
+        if (workingMeshResolution == heightMapResolution)
+            heights = targetTerrain.terrainData.GetHeights(0, 0, heightMapResolution, heightMapResolution);
+        else
+        {
+            float interval = 1f / (float)workingMeshResolution;
 
-        Vector3[] vertices = new Vector3[heightMapResolution * heightMapResolution];
-        Vector2[] uvCoordinates = new Vector2[heightMapResolution * heightMapResolution];
-        int[] triangleIndices = new int[heightMapResolution * heightMapResolution * 3 * 2];
+            workingScale.x /= (float)workingMeshResolution / (float)heightMapResolution;
+            workingScale.y = 1f;
+            workingScale.z /= (float)workingMeshResolution / (float)heightMapResolution;
+
+            heights = targetTerrain.terrainData.GetInterpolatedHeights(0, 0,
+                                                                       workingMeshResolution, workingMeshResolution,
+                                                                       interval, interval);
+        }
+
+        int numVertices = workingMeshResolution * workingMeshResolution;
+        vertices = new Vector3[numVertices];
+        uvCoordinates = new Vector2[numVertices];
+        triangleIndices = new int[numVertices * 3 * 2];
 
         // generate the mesh data
-        for (int y = 0; y < heightMapResolution; y++) 
-        { 
-            for(int x = 0; x < heightMapResolution; x++) 
+        for (int y = 0; y < workingMeshResolution; y++)
+        {
+            for (int x = 0; x < workingMeshResolution; x++)
             {
-                int vertIndex = x + y * heightMapResolution;
+                int vertIndex = x + y * workingMeshResolution;
 
-                vertices[vertIndex] = new Vector3(x * targetTerrain.terrainData.heightmapScale.x,
-                                                  heights[y, x] * targetTerrain.terrainData.heightmapScale.y,
-                                                  y * targetTerrain.terrainData.heightmapScale.z);
-                uvCoordinates[vertIndex] = new Vector2((float)x / (heightMapResolution - 1f), 
-                                                       (float)y / (heightMapResolution - 1f));
+                vertices[vertIndex] = new Vector3(x * workingScale.x,
+                                                  heights[y, x] * workingScale.y,
+                                                  y * workingScale.z);
+                uvCoordinates[vertIndex] = new Vector2((float)x / (workingMeshResolution - 1f),
+                                                       (float)y / (workingMeshResolution - 1f));
 
-                if ((x < (heightMapResolution - 1)) && (y < (heightMapResolution -1)))
+                if ((x < (workingMeshResolution - 1)) && (y < (workingMeshResolution - 1)))
                 {
                     triangleIndices[(vertIndex * 6) + 0] = vertIndex;
-                    triangleIndices[(vertIndex * 6) + 1] = vertIndex + heightMapResolution;
-                    triangleIndices[(vertIndex * 6) + 2] = vertIndex + heightMapResolution + 1;
+                    triangleIndices[(vertIndex * 6) + 1] = vertIndex + workingMeshResolution;
+                    triangleIndices[(vertIndex * 6) + 2] = vertIndex + workingMeshResolution + 1;
                     triangleIndices[(vertIndex * 6) + 3] = vertIndex;
-                    triangleIndices[(vertIndex * 6) + 4] = vertIndex + heightMapResolution + 1;
+                    triangleIndices[(vertIndex * 6) + 4] = vertIndex + workingMeshResolution + 1;
                     triangleIndices[(vertIndex * 6) + 5] = vertIndex + 1;
                 }
             }
         }
+    }
+
+    void ConvertToMesh(Terrain targetTerrain, ETextureResolution textureResolution, EMeshExportResolution meshResolution)
+    {
+        Vector3[] vertices;
+        Vector2[] uvCoordinates;
+        int[] triangleIndices;
+        ConvertHeightMapToMesh(targetTerrain, meshResolution, out vertices, out uvCoordinates, out triangleIndices);      
 
         string baseAssetName = targetTerrain.name;
         string scenePath = System.IO.Path.GetDirectoryName(SceneManager.GetActiveScene().path);
@@ -334,6 +395,19 @@ public class TerrainHelperEditorWindow : EditorWindow
         bool oldDrawTreesAndFoliage = targetTerrain.drawTreesAndFoliage;
         targetTerrain.drawTreesAndFoliage = false;
 
+        // build up a list of GOs to hide
+        List<GameObject> GOsToUnhide = new();
+        for (int childIndex = 0; childIndex < targetTerrain.transform.childCount; childIndex++)
+        {
+            GameObject childGO = targetTerrain.transform.GetChild(childIndex).gameObject;
+
+            if (childGO == textureCaptureGO || !childGO.activeInHierarchy)
+                continue;
+
+            childGO.SetActive(false);
+            GOsToUnhide.Add(childGO);
+        }
+
         // setup render texture and capture the image
         RenderTexture captureRT = new RenderTexture((int)textureResolution, (int)textureResolution, 24);
         captureCamera.targetTexture = captureRT;
@@ -349,6 +423,11 @@ public class TerrainHelperEditorWindow : EditorWindow
         captureCamera.targetTexture = null;
         DestroyImmediate(captureRT);
         DestroyImmediate(textureCaptureGO, true);
+
+        // unhide the GOs
+        foreach (var childGO in GOsToUnhide)
+            childGO.SetActive(true);
+        GOsToUnhide = null;
 
         // save the texture asset
         string texturePath = System.IO.Path.Combine(scenePath, $"{baseAssetName}_Texture.png");
@@ -394,5 +473,43 @@ public class TerrainHelperEditorWindow : EditorWindow
 
             Undo.RegisterCreatedObjectUndo(meshGO, "Created terrain mesh");
         }
+
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+    }
+
+    void OnGUI_SplatMapTools()
+    {
+        EditorGUILayout.LabelField("Splat Map Tools", EditorStyles.boldLabel);
+
+        TerrainTool_ExportSplatmapExpanded = EditorGUILayout.BeginFoldoutHeaderGroup(TerrainTool_ExportSplatmapExpanded, "Export Splat Maps");
+
+        if (TerrainTool_ExportSplatmapExpanded)
+        {
+            if (GUILayout.Button("Export Splat Maps"))
+                ExportSplatMaps(SelectedTerrain);
+        }
+
+        EditorGUILayout.EndFoldoutHeaderGroup();
+    }
+
+    void ExportSplatMaps(Terrain targetTerrain)
+    {
+        string saveFilePath = EditorUtility.SaveFilePanel("Save alpha/splat maps as ...", Application.dataPath, "TerrainSplatMap.png", "png");
+        if (saveFilePath.Length <= 0)
+            return;
+
+        string directoryName = System.IO.Path.GetDirectoryName(saveFilePath);
+        string fileName = System.IO.Path.GetFileNameWithoutExtension(saveFilePath);
+
+        for (int alphaMapIndex = 0; alphaMapIndex < targetTerrain.terrainData.alphamapTextureCount; alphaMapIndex++) 
+        { 
+            Texture2D alphaMapTexture = targetTerrain.terrainData.alphamapTextures[alphaMapIndex];
+
+            string filePath = System.IO.Path.Combine(directoryName, $"{fileName}_{alphaMapIndex}.png");
+            System.IO.File.WriteAllBytes(filePath, alphaMapTexture.EncodeToPNG());
+        }
+
+        AssetDatabase.Refresh();
     }
 }
